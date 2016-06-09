@@ -1,0 +1,571 @@
+---
+title: "Analysis of NYC Food inspection"
+author: "Manroop Singh, Jayesh Borgaonkar"
+date: "June, 2016"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Introduction
+
+Research has shown that 53% of consumers eat outside the home at least once per week, 17% dine outside the home on average of five or more times per week, and 4% dine outside the home seven or more times in any given week (Jones, Vugia, Selman, Angulo, & EIP FoodNet Working Group, 2002). Given the increasing number of individuals that dine in food service establishments on a daily basis, food safety practices
+are critical to protecting the health of the public.
+    		   
+Restaurant operations have been reported to be the cause of between 52% and 59% of foodborne illnesses in the United States (Centers for Disease Control and
+Prevention, 2012b)
+
+Based on all these statistics, we decided to analyse the results of food inspection of various restaurants in New York.
+
+## Problem Description
+
+We obtained a data set of the food inspection results of various restaurant in New York from the New York state website. Based on exploratory and predictory analysis, we wish to make the restaurant inspection process more efficient for the Department of Health and Mental Hygiene. Using the results of our analysis, we wish to determine which restaurants should be inspected first.
+
+## Packages used
+
+To solve this problem, we decided to use the following packages.
+
+```{r,echo=FALSE, warning=FALSE, message= FALSE}
+library(readr)
+library(magrittr)
+library(dplyr)
+library(data.table)
+# library(plyr) 
+library(dplyr) 
+library(ggplot2) 
+library(gplots)
+library(lubridate)
+library(devtools)
+library(Rcpp)
+#install_github('arilamstein/choroplethrZip@v1.5.0')
+library(choroplethrZip)
+library(glmnet)
+library(e1071)
+library(tm)
+library(wordcloud)
+library(plotly)
+library(manipulate)
+
+packages = c(1, 2, 5, 5, 4, 2, 3, 1, 2, 1, 3, 3, 2, 2, 2, 1)
+names(packages) = c("readr", "magrittr", "dplyr", "data.table", "ggplot2", "gplots", "lubridate", "devtools", "Rcpp", "choroplethrZip", "glmnet", "e1071", "tm", "wordcloud", "plotly", "manipulate")
+wordcloud(names(packages),packages, colors=brewer.pal(8, 'Dark2'), min.freq=1)
+
+foodins_data = read_csv("Dataset.csv")
+```
+
+## About the data
+
+Our data set has the following fields
+
+    - Restaurant Location
+    - Borough
+    - Zipcode
+    - Cuisine
+    - Score
+    - Grade
+    - Inspection type
+    - Critical Flag
+  
+The grades are based on scores. The grades are decided based on the following measures
+
+    Score Range | Grade
+    ------------|---------
+     0-13       |  A
+     14-27      |  B
+     >28        |  C
+     
+## Cleaning the data
+
+
+* Eliminated data having:
+    - Inspection dates in the year 1900
+    - Borough as "Missing"
+    - Negative Inspection scores and Empty Inspection scores
+    
+* Populated the grades field based on the guidelines of score provided by the Depatment of Health and Mental Hygiene
+
+* Converted the categorical fields of data such as violation code, cuisine, inspection type and critical flag to factors
+
+```{r, echo = FALSE, warning=FALSE, message= FALSE}
+foodins_data$VIOLATION_DESCRIPTION = gsub("[^0-9A-Za-z///().,-;' ]", " ", foodins_data$VIOLATION_DESCRIPTION)
+foodins_data$VIOLATION_DESCRIPTION = gsub("\\s+"," ",foodins_data$VIOLATION_DESCRIPTION)
+
+foodins_data$INSPECTION_DATE=as.Date(foodins_data$INSPECTION_DATE, "%m/%d/%Y")
+foodins_data$GRADE_DATE=as.Date(foodins_data$GRADE_DATE, "%m/%d/%Y")
+foodins_cleandata = filter(foodins_data, 
+                       #Eliminate rows with no boro information
+                       foodins_data$RESTAURANT_AREA != 'Missing' &
+                       #Eliminate rows with inspection date lesser than 1900
+                       foodins_data$INSPECTION_DATE > '1900-01-01' &
+                       #Eliminate rows with no scores
+                       !is.na(foodins_data$SCORE) &
+                       #Eliminate rows with negative scores
+                       foodins_data$SCORE >= 0)
+
+### Updating the Grade column based on scores
+foodins_cleandata[which(foodins_cleandata$SCORE >= 0 & foodins_cleandata$SCORE<=13),]$GRADE <- "A"
+foodins_cleandata[which(foodins_cleandata$SCORE<=27 & foodins_cleandata$SCORE>13),]$GRADE <- "B"
+foodins_cleandata[which(foodins_cleandata$SCORE>=28),]$GRADE <- "C"
+```
+
+## Little more about the data
+
+We made an analysis on the number of restaurants by Cuisine and Borough -
+
+- American Cuisine has the maximum number of restaurants and Manhattan has the maximum number of restaurants
+  
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# detach("package:plyr", unload=TRUE) 
+dt_foodins_cleandata = as.data.table(foodins_cleandata)
+
+# Number of restaurants count by cuisines
+rest_by_cuisines = dt_foodins_cleandata %>% group_by(., dt_foodins_cleandata$RESTAURANT_CUISINE) %>% summarise(., count=n()) %>% arrange(., desc(count)) %>% top_n(., 16, count)
+names(rest_by_cuisines) = c("Cuisine", "Count")
+ggplot(rest_by_cuisines, aes(rest_by_cuisines$Cuisine, rest_by_cuisines$Count, fill=Count)) + geom_bar(stat="identity") + scale_x_discrete("Cuisine", labels=abbreviate) + scale_y_discrete("Count")
+
+# Number of restaurants count by borough
+rest_by_borough = dt_foodins_cleandata %>% group_by(., dt_foodins_cleandata$RESTAURANT_AREA) %>% summarise(., count=n()) %>% arrange(., desc(count)) %>% top_n(., 20, count)
+ggplot(rest_by_borough, aes(rest_by_borough$`dt_foodins_cleandata$RESTAURANT_AREA`, rest_by_borough$count, fill=count)) + geom_bar(stat="identity") + scale_x_discrete("Borough") + scale_y_discrete("Count")
+```
+
+## What are the most common violations in restaurants of New York?
+
+As we can see from the graph plotted below,
+
+```{r, echo = FALSE, warning=FALSE, message= FALSE}
+##  Most common violation codes
+DT = as.data.table(foodins_cleandata)
+setkey(DT,VIOLATION_CODE)
+DT_topNViolationCodes <-DT[,.N,by=list(VIOLATION_CODE,VIOLATION_DESCRIPTION)]
+DT_topNViolationCodes <- DT_topNViolationCodes[order(-DT_topNViolationCodes$N),]
+
+b <-barplot(head(DT_topNViolationCodes$N,10), xlab = "Violation Code", ylab = "Frequency", main="Most common violations", col="lightblue", ylim=c(0,70000))
+axis(1,at=b,labels=head(DT_topNViolationCodes$VIOLATION_CODE,10));
+text(x=b, y = head(DT_topNViolationCodes$N,10), labels=head(DT_topNViolationCodes$N,10), pos = 3, cex = 0.8, col = "darkblue")
+
+## Top 5 Violation Descriptions
+print("Facilities-related violations constitute the maximum number of violations, followed closely by Vermin-related violations.")
+#head(DT_topNViolationCodes$VIOLATION_DESCRIPTION,5);
+```
+
+## Word cloud of most common violations
+
+```{r, echo = FALSE, warning=FALSE, message= FALSE}
+sampling1 = sample(foodins_cleandata$VIOLATION_DESCRIPTION, 50000)
+sampling2 = sample(foodins_cleandata$VIOLATION_DESCRIPTION, 50000)
+sampling3 = sample(foodins_cleandata$VIOLATION_DESCRIPTION, 50000)
+
+ctext = Corpus(VectorSource(sampling1))
+ctext = tm_map(ctext,removePunctuation)
+ctext = tm_map(ctext,removeWords,stopwords("english"))
+tdm = TermDocumentMatrix(ctext,control=list(minWordLength=4))
+tdm2 = as.matrix(tdm)
+wordcount = sort(rowSums(tdm2),decreasing=TRUE)
+tdm_names = names(wordcount)
+wordcloud(tdm_names,wordcount, max.words=100, colors=brewer.pal(8, 'Dark2'))
+
+ctext1 = Corpus(VectorSource(sampling2))
+ctext1 = tm_map(ctext1,removePunctuation)
+ctext1 = tm_map(ctext1,removeWords,stopwords("english"))
+tdm1 = TermDocumentMatrix(ctext1,control=list(minWordLength=4))
+tdm21 = as.matrix(tdm1)
+wordcount1 = sort(rowSums(tdm21),decreasing=TRUE)
+tdm_names1 = names(wordcount1)
+wordcloud(tdm_names1,wordcount1, max.words=100, colors=brewer.pal(8, 'Dark2'))
+
+ctext2 = Corpus(VectorSource(sampling3))
+ctext2 = tm_map(ctext2,removePunctuation)
+ctext2 = tm_map(ctext2,removeWords,stopwords("english"))
+tdm22 = TermDocumentMatrix(ctext2,control=list(minWordLength=4))
+tdm222 = as.matrix(tdm22)
+wordcount2 = sort(rowSums(tdm222),decreasing=TRUE)
+tdm_names2 = names(wordcount2)
+wordcloud(tdm_names2,wordcount2, max.words=100, colors=brewer.pal(8, 'Dark2'))
+```
+
+## What are the major categories of food violations?
+* We categorized violation codes into the following broad categories:
+    - Facilities
+    - Vermin
+    - Temperature
+    - Food
+    - Regulatory
+    - Contamination
+    - Hygiene
+    - Smoking
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+DT = as.data.table(foodins_cleandata);			   
+DT$VIOLATION_TYPE <- ""
+DT[VIOLATION_CODE %in% c("02A","02B","02C","02D","02E","02F","02G","02H","02I","02J")]$VIOLATION_TYPE <- "Temperature"
+DT[VIOLATION_CODE %in% c("03A","03B","03C","03D","03E","03F","03G","04G","04I","04J","09A","09B")]$VIOLATION_TYPE <- "Food"
+DT[VIOLATION_CODE %in% c("04A","06G","06H","06I","16A","16B","16C","16E","16F","18B","18C","18D","18F","18G")]$VIOLATION_TYPE <- "Regulatory"
+DT[VIOLATION_CODE %in% c("04B","04D","04E","04F","04H","05B","06C","06D")]$VIOLATION_TYPE <- "Contamination"
+DT[VIOLATION_CODE %in% c("04C","06A","06B")]$VIOLATION_TYPE <- "Hygiene"
+DT[VIOLATION_CODE %in% c("05A","05C","05D","05E","05F","05H","05I","06E","06F","07A","08B","09C","10A","10B","10C","10D","10E","10F","10H","10I","10J","22A","22B","22E","20A","20B","20D","20E","20F")]$VIOLATION_TYPE <- "Facilities"
+DT[VIOLATION_CODE %in% c("04K","04L","04M","04N","04O","08A","08C")]$VIOLATION_TYPE <- "Vermin"
+DT[VIOLATION_CODE %in% c("15E","15H","15I","15J","15K","15L","15S","15T")]$VIOLATION_TYPE <- "Smoking"
+
+
+## Percentage distribution of violatin types - pie chart
+DT_ViolationType= DT[which(DT$VIOLATION_TYPE!="")]
+
+violation_types = table(DT_ViolationType$VIOLATION_TYPE);
+slices = as.vector(violation_types);
+percent_violationtypes <- round(violation_types/sum(violation_types)*100);
+
+names_violationtypes <- c("Contamination", "Facilities", "Food", "Hygiene", "Regulatory","Temperature","Vermin");
+
+lbls <- paste(names_violationtypes, percent_violationtypes)
+lbls <- paste(lbls,"%",sep="")
+pie(slices,labels = lbls, col= c("pink","lightblue","green","indianred3","cyan","white","grey"), main = "Pie Chart of Violation Types")
+```
+
+## How is critical flag distributed over violation category?
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+t = table(DT_ViolationType$VIOLATION_TYPE, DT_ViolationType$CRITICAL_FLAG) 
+
+# taking transpose
+df=t(t);
+df=df[,order(-colSums(df))]
+p <- plot_ly(
+  x = colnames(df),
+  y = df["Critical",],
+  name = "Critical",
+  type = "bar")
+
+p2 <- add_trace(
+  p,
+   x = colnames(df),
+   y = df["Not Critical",],
+  name = "Not Critical",
+  type = "bar")
+
+p3 <- layout(p2, barmode = "stack", title="Distribution of critical and not critical flag in violation types", xaxis = list(title = "Violation Types"), yaxis = list(title = "Frequency"))
+p3
+
+```
+
+-  How are grades distributed over violation category?
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+
+t = table(DT_ViolationType$VIOLATION_TYPE, DT_ViolationType$GRADE) 
+
+#v = sort(rowSums(t),decreasing=TRUE)
+
+# taking transpose
+df=t(t);
+df=df[,order(-colSums(df))]
+p <- plot_ly(
+  x = colnames(df),
+  y = df["A",],
+  name = "A",
+  type = "bar")
+
+p2 <- add_trace(
+  p,
+   x = colnames(df),
+   y = df["B",],
+  name = "B",
+  type = "bar")
+
+
+p3 <- add_trace(
+  p2,
+   x = colnames(df),
+   y = df["C",],
+  name = "C",
+  type = "bar")
+
+p4 <- layout(p3, barmode = "stack", title="Distribution of grades in violation types", xaxis = list(title = "Violation Types"), yaxis = list(title = "Frequency"))
+p4
+
+```
+
+## Does cuisine have any relationship with critical flag?
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+DT = as.data.table(foodins_cleandata)
+DT_Cuisine=table(DT$RESTAURANT_CUISINE);
+DT_Cuisine1=t(DT_Cuisine);
+DT_Cuisine1=DT_Cuisine1[,order(-colSums(DT_Cuisine1))];
+top_ten_cuisines=t(head(DT_Cuisine1,7));
+top_ten_cuisines = t(colnames(top_ten_cuisines));
+top_ten_cuisines = top_ten_cuisines[1,];
+DT_Cuisine=DT[DT$RESTAURANT_CUISINE %in% top_ten_cuisines[1:7]]
+
+
+DT_Cuisine$RESTAURANT_CUISINE = gsub(pattern = "Latin \\(Cuban, Dominican, Puerto Rican, South \\& Central American\\)",replacement = "Latin", 
+DT_Cuisine$RESTAURANT_CUISINE);
+
+
+DT_Cuisine$RESTAURANT_CUISINE=as.factor(DT_Cuisine$RESTAURANT_CUISINE)
+DT_Cuisine$CRITICAL_FLAG=as.factor(DT_Cuisine$CRITICAL_FLAG)
+
+t = table(DT_Cuisine$RESTAURANT_CUISINE, DT_Cuisine$CRITICAL_FLAG);
+df=t(t);
+df=df[,order(-colSums(df))];
+
+# plot the graph
+p <- plot_ly(
+  x = colnames(df),
+  y = df["Critical",]/colSums(df)*100,
+  name = "Critical",
+  type = "bar")
+
+p2 <- add_trace(
+  p,
+   x = colnames(df),
+   y = df["Not Critical",]/colSums(df)*100,
+  name = "Not Critical",
+  type = "bar")
+
+p3 <- add_trace(
+  p2,
+   x = colnames(df),
+   y = df["Not Applicable",]/colSums(df)*100,
+  name = "Not Appliable",
+  type = "bar")
+
+p4 <- layout(p3, barmode = "stack", title="Distribution of critical flag over cuisine types", xaxis = list(title = "Cuisine Types"), yaxis = list(title = "Percentage"))
+p4
+
+```
+
+## How are the restaurants distributed by borough and grade?
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# Grades by borough
+ggplot(data=dt_foodins_cleandata, aes(x=reorder(dt_foodins_cleandata$RESTAURANT_AREA ,dt_foodins_cleandata$RESTAURANT_AREA,function(x)-length(x)))) + geom_bar(aes(fill=dt_foodins_cleandata$GRADE), position='dodge') + labs(title='Distribution of Restaurants by borough and grade', x='Borough', y='Restaurants') + scale_fill_brewer(name="Grade", palette='Paired') + theme_bw() + theme(legend.key=element_blank())
+```
+
+## How are the restaurants distributed by borough and critical flag?
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# Critical Flag by Borough
+ggplot(data=dt_foodins_cleandata, aes(x=reorder(dt_foodins_cleandata$RESTAURANT_AREA ,dt_foodins_cleandata$RESTAURANT_AREA,function(x)-length(x)))) + geom_bar(aes(fill=dt_foodins_cleandata$CRITICAL_FLAG), position='dodge') + labs(title='Distribution of Restaurants by Borough and Critical flag', x='Borough', y='Critical Flag') + scale_fill_brewer(name="Critical Flag", palette='Paired') + theme_bw() + theme(legend.key=element_blank())
+```
+
+## How are the grades distributed over the years (2011 - 2016)?
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+DT$INSPECTION_DATE = as.Date(DT$INSPECTION_DATE);
+DT$INSPECTION_YEAR=year(DT$INSPECTION_DATE);
+
+DT$INSPECTION_YEAR=as.factor(DT$INSPECTION_YEAR);
+
+t=table(DT$GRADE,DT$INSPECTION_YEAR);
+
+plot(colnames(t),t[1,],type = "o",col = "blue", xlab = "Year", ylab = "Grade Frequency", main = "Grades trend over the years")
+lines(colnames(t),t[2,], type = "o", col = "green")
+lines(colnames(t),t[3,], type = "o", col = "red")
+
+legend("topleft", c("Grade A","Grade B","Grade C"), lty=c(1,1), lwd=c(2.5,2.5), col=c("blue","green","red"))
+
+```
+
+## Bottom 5 restaurants by score 
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# We have used manipulate package(provides interactive graphs) which only runs within RStudio calls and gives an error when knitted to HTML.
+# We have commented the manipulate chunk of code below to avoid the error while knitting
+
+## replaced Latin cuisine to make text shorter
+DT$RESTAURANT_CUISINE = gsub(pattern = "Latin \\(Cuban, Dominican, Puerto Rican, South \\& Central American\\)",replacement = "Latin", 
+DT$RESTAURANT_CUISINE);
+
+
+grouped_data <- aggregate(DT$SCORE, by=list(DT$RESTAURANT_ID, DT$RESTAURANT_NAME, DT$RESTAURANT_AREA,DT$RESTAURANT_CUISINE), FUN=sum);
+
+names(grouped_data)<- c("RESTAURANT_ID","RESTAURANT_NAME","RESTAURANT_AREA","RESTAURANT_CUISINE","SCORE");
+grouped_data<-grouped_data[order(-grouped_data$SCORE),]
+
+DT_TOPSCORES = filter(grouped_data,grouped_data$SCORE > 0)
+DT_TOPSCORES=as.data.table(DT_TOPSCORES);
+head(DT_TOPSCORES,10); 
+
+#manipulate(
+#ggplot(data.frame(DT_TOPSCORES[1:cn1]$RESTAURANT_NAME, DT_TOPSCORES[1:cn1]$SCORE), aes(x=reorder(DT_TOPSCORES[1:cn1]$RESTAURANT_NAME,-DT_TOPSCORES[1:cn1]$SCORE),
+# y=DT_TOPSCORES[1:cn1]$SCORE, label=paste(paste("Score",DT_TOPSCORES[1:cn1]$SCORE,sep=":"),paste("Cuisine",DT_TOPSCORES[1:cn1]$RESTAURANT_CUISINE,sep=":"), sep=",")))
+# + geom_point() + geom_text(hjust = 0, nudge_x = 0.05) + ggtitle("Worst 5 #restaurants by score") + xlab("Restaurant Name") + ylab("Inspection Score"),
+# cn1=slider(1,5))
+
+```
+
+* Manipulate in RStudio to explain the analysis
+
+## Analysis of Closed Restaurants by Cuisine and Borough
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# Making a data table of closed and reclosed restaurants and finding % of restaurants that were closed
+#Select restaurants that have been closed
+closed_restaurants = filter(foodins_cleandata, 
+                  foodins_cleandata$ACTION == "Establishment Closed by DOHMH.  Violations were cited in the following area(s) and those requiring immediate action were addressed.")
+closed_restaurants$ACTION = "Closed"
+
+#Select restaurants that have been reclosed
+reclosed_restaurants = filter(foodins_cleandata, 
+                  foodins_cleandata$ACTION == "Establishment re-closed by DOHMH")
+reclosed_restaurants$ACTION = "Reclosed"
+
+closed_reclosed_restaurants = rbind(closed_restaurants,reclosed_restaurants)
+```
+
+- Percentage of restaurants which were closed by DOHMH due to violations
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# Percentage of restaurants which were closed by DOHMH due to violations
+paste("Percentage of restaurants which were closed by DOHMH due to violations =", round((length(closed_reclosed_restaurants$ACTION)/dim(foodins_cleandata)[1])*100,3))
+
+dt_closed_reclosed_rest = as.data.table(closed_reclosed_restaurants)
+```
+
+- Count of restaurants closed in each borough 
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# Total count of restaurants closed in each borough 
+closed_by_borough = dt_closed_reclosed_rest %>% group_by(., dt_closed_reclosed_rest$RESTAURANT_AREA) %>% summarise(., count=n()) %>% arrange(., desc(count))
+names(closed_by_borough) = c("Borough","Count")
+ggplot(closed_by_borough, aes(Borough, Count, fill=Count), ylab = "Borough", xlab = "Restaurant Count", horiz = TRUE, legend.text = unique(closed_by_borough$Borough)) + geom_bar(stat = "identity")
+
+# Total Count of Closed Restaurants by Cuisine
+closed_by_cuisine = dt_closed_reclosed_rest %>% group_by(., dt_closed_reclosed_rest$RESTAURANT_CUISINE) %>% summarise(., count=n()) %>% arrange(., desc(count)) %>% top_n(., 10, count)
+names(closed_by_cuisine) = c("Cuisine","Count")
+ggplot(closed_by_cuisine, aes(Cuisine, Count, fill=Count), ylab = "Cuisine", xlab = "Restaurant Count", horiz = TRUE, legend.text = unique(closed_by_cuisine$Cuisine)) + geom_bar(stat = "identity") + scale_x_discrete("Cuisine", labels=abbreviate) + scale_y_discrete("Count")
+```
+
+- Overall Analysis of Restaurants by Action Type
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+DT$ACTION_TYPE <- ""
+DT[ACTION %in% c("Violations were cited in the following area(s).")]$ACTION_TYPE <- "Violations"
+DT[ACTION %in% c("No violations were recorded at the time of this inspection.")]$ACTION_TYPE <- "No Violations"
+DT[ACTION %in% c("Establishment re-opened by DOHMH")]$ACTION_TYPE <- "Re-Opened"
+DT[ACTION %in% c("Establishment Closed by DOHMH.  Violations were cited in the following area(s) and those requiring immediate action were addressed.")]$ACTION_TYPE <- "Closed"
+DT[ACTION %in% c("Establishment re-closed by DOHMH")]$ACTION_TYPE <- "Re-Closed"
+rest_action = DT %>% group_by(., DT$ACTION_TYPE) %>% summarise(., Count=n()) %>% arrange(., desc(Count))
+plot_ly(rest_action, labels = rest_action$`DT$ACTION_TYPE`, values = rest_action$Count, type = "pie")
+``` 
+
+## Overall Analysis of Restaurants by Zip
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+# Analysis of Scores of Restaurants by Zip
+avg_scores_by_zip = aggregate(dt_foodins_cleandata$SCORE, by=list(dt_foodins_cleandata$RESTAURANT_ZIPCODE), FUN=mean) 
+names(avg_scores_by_zip) = c("region","value")
+setorderv(avg_scores_by_zip,c("value"),c(-1),na.last=TRUE)
+
+current_zipcodes = unique(avg_scores_by_zip$region)
+missing_zipcodes = c('10285', '11352', '11242', '10123', '11249', '10175', '10176', '10317', '10118', '10281', '11256', '7005', '10104', '10106', '10057', '10121', '10105', '10166', '10107', '10048', '10178', '10179', '10055')
+filtered_zipcodes = current_zipcodes[!(current_zipcodes %in% missing_zipcodes)]
+
+avg_scores_by_zip$region = as.character(avg_scores_by_zip$region)
+zip_choropleth(avg_scores_by_zip, zip_zoom = filtered_zipcodes, title="Average of Scores by Zipcode", num_colors=5) + scale_fill_brewer(palette='Accent')
+```
+
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+foodins_cleandata$RESTAURANT_CUISINE = as.factor(foodins_cleandata$RESTAURANT_CUISINE)
+foodins_cleandata$VIOLATION_CODE = as.factor(foodins_cleandata$VIOLATION_CODE)
+foodins_cleandata$CRITICAL_FLAG = as.factor(foodins_cleandata$CRITICAL_FLAG)
+foodins_cleandata$INSPECTION_TYPE = as.factor(foodins_cleandata$INSPECTION_TYPE)
+foodins_cleandata$GRADE = factor(foodins_cleandata$GRADE, levels = c("A", "B", "C"), labels = c(1,2,3))
+```
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+## Partitioning train and test data
+
+foodins_completedata = foodins_cleandata[complete.cases(foodins_cleandata),]
+
+train_len = floor(0.7 * nrow(foodins_completedata))
+total_indices = seq(1, nrow(foodins_completedata))
+train_indices = sample(total_indices,train_len)
+test_indices = setdiff(total_indices, train_indices)
+
+train_data = foodins_completedata[train_indices,]
+test_data = foodins_completedata[test_indices,]
+
+## Creating train and test x variables
+x_train = train_data[,c(1, 8, 11, 13, 18)]
+x_test = test_data[,c(1, 8, 11, 13, 18)]
+
+```
+
+## Can we predict which restaurants will fall into which grade?
+
+The following factors affect the score of the restaurant which in turn affects the grade -
+
+* Restaurant Location
+* Restaurant Cuisine
+* Type of violation
+* Criticality of the violation
+* Type of Inspection
+    
+We fit a Naive Bayes model to our data and predicted the grade for the restaurants.
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+## Predicting grade
+res = naiveBayes(x_train,train_data$GRADE)
+yhat = predict(res,x_test,type="raw")
+ 
+yhat_consolidated = rep(0, nrow(x_test))
+yhat_consolidated[which(yhat[,1]>=yhat[,2] & yhat[,1] >= yhat[,3])] = 1
+yhat_consolidated[which(yhat[,2]>=yhat[,1] & yhat[,2] >= yhat[,3])] = 2
+yhat_consolidated[which(yhat[,3]>=yhat[,2] & yhat[,3] >= yhat[,1])] = 3
+out_grade = table(test_data$GRADE,yhat_consolidated)
+out_grade
+chisq.test(out_grade)
+```
+  
+## k- Means clustering by score
+
+Recommending the go-to and must-avoid restaurants in New York
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+require(graphics)
+fit = kmeans(foodins_cleandata[,14],6)
+
+barplot((fit$size)*100/sum(fit$size), xlab = "Cluster Center", ylab = "Cluster Size (%)",  col="grey", ylim=c(0, 50), names.arg = floor(fit$center))
+title(main = "K means Cluster Distribution", font.main = 4)
+
+DT$FIT = fit$cluster
+```
+    
+* Top 10 GO-TO Restaurants
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+print("Distribution of Grades in Cluster among the Go-To restaurants: ") 
+print(table(DT[which(DT$FIT==2)]$GRADE))
+head(unique(DT[which(DT$FIT==2)]$RESTAURANT_NAME),10)
+```
+
+* Top 10 MUST-AVOID Restaurants
+
+```{r,echo = FALSE, warning=FALSE, message= FALSE}
+print("Distribution of Grades in Cluster among the Must-Avoid restaurants: ") 
+print(table(DT[which(DT$FIT==6)]$GRADE))
+head(unique(DT[which(DT$FIT==6)]$RESTAURANT_NAME),10)
+```
+
+## Challenges
+
+* Random Forest classification could not be used as we had more than 53 categories of data
+* Manipulate function does not work while kniting RMD files
+* We tried predicting the scores of the restaurants. However, there is no hard upperbound for the score for a restaurant. Our Logit model did not fit to the data.
+
+## Conclusion
+
+* New York has maximum restaurants in Manhattan
+* American is the most popular cusinie type in New York followed by Chinese
+* Most violations are of type Facility which are not critical.
+* Vermin based violations have the most number of critical violations
+* Chinese restaurants have the maximum critical violations.
+* Number of restaurants have increased over the years. Count of Grade C restaurants have remained at a constant level over the years. Thus, restaurants are now taking the inspection audit seriously.
+* Mediterranien and Australian cusinies have maximum closed restaurants over the years
+* Food Inspectors should inspect Chinese restaurant in Manhattan region first. 
+
+We don't want roaches on our plates and mice near our feet, do we?! 
